@@ -1,5 +1,6 @@
 #include <azure_ai_contentsafety_text.h>
 #include <iostream>
+#include <chrono>
 #include <csignal>
 #include "thread"
 #include <filesystem>
@@ -8,277 +9,323 @@
 #include <cstdlib>  // For _dupenv_s
 #include <string>   // For std::string
 #include <stdexcept> // For std::invalid_argument, std::out_of_range
-#include <map>
-#include <sstream>
-#include <Windows.h>
-#include <conio.h>
+#include <streambuf>
+#include <windows.h>
 
 using namespace Azure::AI::ContentSafety;
+// Define the signal handler function
+void signalHandler(int signum) {
+    std::cout << "Interrupt signal (" << signum << ") received.\n";
 
-std::map<std::string, std::string> readConfig(const std::string &filename) {
-    std::map<std::string, std::string> config;
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        throw std::runtime_error("Could not open config file");
-    }
+    // Cleanup and close up stuff here
 
-    std::string line;
-    while (std::getline(file, line)) {
-        std::istringstream is_line(line);
-        std::string key;
-        if (std::getline(is_line, key, '=')) {
-            std::string value;
-            if (std::getline(is_line, value)) {
-                config[key] = value;
-            }
+    // Terminate program
+    exit(signum);
+}
+
+int get_op_thread_num_from_env() {
+    char* env_var = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&env_var, &len, "AACS_NUM_THREADS") == 0 && env_var != nullptr) {
+        try {
+            int num_threads = std::stoi(env_var);
+            free(env_var); // Free the allocated memory
+            return num_threads;
         }
+        catch (const std::invalid_argument& e) {
+            std::cerr << "Invalid value for AACS_NUM_THREADS: " << env_var << std::endl;
+        }
+        catch (const std::out_of_range& e) {
+            std::cerr << "Value out of range for AACS_NUM_THREADS: " << env_var << std::endl;
+        }
+        free(env_var); // Free the allocated memory in case of exception
     }
-    return config;
+    else {
+        std::cerr << "Environment variable AACS_NUM_THREADS is not set." << std::endl;
+    }
+    return 4; // Default value
 }
 
 std::string getCategoryName(TextCategory category) {
     switch (category) {
-        case TextCategory::Hate:
-            return "Hate";
-        case TextCategory::SelfHarm:
-            return "Self Harm";
-        case TextCategory::Sexual:
-            return "Sexual";
-        case TextCategory::Violence:
-            return "Violence";
-        default:
-            return "Unknown";
+    case TextCategory::Hate:
+        return "Hate";
+    case TextCategory::SelfHarm:
+        return "Self Harm";
+    case TextCategory::Sexual:
+        return "Sexual";
+    case TextCategory::Violence:
+        return "Violence";
+    default:
+        return "Unknown";
     }
 }
 
-std::vector<char> readFile(const std::string& filename) {
-    std::vector<char> buffer;
-#ifdef _WIN32
-    HANDLE hFile = CreateFile(filename.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        std::cerr << "Could not open file" << std::endl;
-        return buffer;
+std::string GetCurrentDir() {
+    char path[MAX_PATH];
+    DWORD result = GetCurrentDirectoryA(sizeof(path), path);
+    return path;
+}
+
+void Init(TextModelRuntime** aacs, const TextModelConfig& config, const std::string &license) {
+    std::cout << "------license- " << license.c_str() << std::endl;
+    (*aacs) = new TextModelRuntime(license.c_str(), config);
+    (*aacs)->Reload();
+}
+
+void Uninit(TextModelRuntime* aacs) {
+    if (aacs) {
+        aacs->Unload();
+        delete aacs;
+        aacs = NULL;
     }
+}
 
-    DWORD fileSize = GetFileSize(hFile, NULL);
-    if (fileSize == INVALID_FILE_SIZE) {
-        std::cerr << "Could not get file size" << std::endl;
-        CloseHandle(hFile);
-        return buffer;
+void TestFromCmd(const TextModelConfig& config, const std::string & license) {
+    // Register signal and signal handler
+    signal(SIGINT, signalHandler);
+
+    // Ask for model path
+    auto modelPath = std::filesystem::current_path().string() + "\\";
+    // Get the starting timepoint
+    auto start = std::chrono::high_resolution_clock::now();
+    std::cout << "Loading model from " << modelPath << std::endl;
+    TextModelRuntime* aacs = NULL;
+    Init(&aacs, config, license);
+    // Get the ending timepoint
+    auto end = std::chrono::high_resolution_clock::now();
+    auto modelLoadDuration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << "Model loaded successfully, duration: " << modelLoadDuration.count() << " milliseconds" << std::endl;
+    std::cout << "--------------------------------------------------------------------------------------" << std::endl;
+    start = std::chrono::high_resolution_clock::now();
+    aacs->Unload();
+    end = std::chrono::high_resolution_clock::now();
+    auto modelOffloadDuration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << "Model offloaded successfully, duration: " << modelOffloadDuration.count() << " milliseconds" << std::endl;
+    std::cout << "--------------------------------------------------------------------------------------" << std::endl;
+    start = std::chrono::high_resolution_clock::now();
+    aacs->Reload();
+    end = std::chrono::high_resolution_clock::now();
+    auto modelReloadDuration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << "Model Reloaded successfully, duration: " << modelReloadDuration.count() << " milliseconds" << std::endl;
+    std::cout << "--------------------------------------------------------------------------------------" << std::endl;
+
+
+    // Loop to continuously ask for user input
+    while (true) {
+        AnalyzeTextOptions request;
+        std::string inputText;
+
+        std::cout << "Enter text to analyze (Ctrl+C to exit): ";
+        std::getline(std::cin, inputText);
+        std::cout << "  Your input: " << inputText << std::endl;
+
+        request.text = inputText;
+        std::cout << "  AnalyzeResult: " << std::endl;
+        auto severityThreshold = 3;
+        // Run inference
+        auto analyzeStart = std::chrono::high_resolution_clock::now();
+        AnalyzeTextResult result;
+        aacs->AnalyzeText(request, result);
+        // Print the result to the console
+        for (const auto& categoryAnalysis : result.categoriesAnalysis) {
+            if (categoryAnalysis.severity > 0 && categoryAnalysis.severity < severityThreshold) {
+                std::cout << "\033[33m";  // Set the text color to yellow
+            }
+            else if (categoryAnalysis.severity >= severityThreshold) {
+                std::cout << "\033[31m";  // Set the text color to red
+            }
+            else {
+                std::cout << "\033[32m";  // Set the text color to green
+            }
+            std::cout << "    Category: " << getCategoryName(categoryAnalysis.category) << ", Severity: "
+                << static_cast<int>(categoryAnalysis.severity) << std::endl;
+            std::cout << "\033[0m";  // Reset the text color
+        }
+        auto analyzeEnd = std::chrono::high_resolution_clock::now();
+        auto analyzeTextDuration = std::chrono::duration_cast<std::chrono::milliseconds>(analyzeEnd - analyzeStart);
+        std::cout << "AnalyzeText duration: " << analyzeTextDuration.count() << " milliseconds" << std::endl;
+        std::cout << "--------------------------------------------------------------------------------------" << std::endl;
     }
+}
 
-    HANDLE hMapFile = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (hMapFile == NULL) {
-        std::cerr << "Could not create file mapping object" << std::endl;
-        CloseHandle(hFile);
-        return buffer;
+
+void AnalyzeText(TextModelRuntime* aacs, const std::string& inputText, AnalyzeTextResult& out)
+{
+    AnalyzeTextOptions request;
+    request.text = inputText;
+    aacs->AnalyzeText(request, out);
+}
+
+void AnalyzeTextFromFile(TextModelRuntime* aac, const std::string& file, int loop) {
+    std::ifstream inputFile;
+
+    inputFile.open(file);
+    if (inputFile.is_open()) {
+        std::string line;
+        unsigned long long avg = 0;
+        int count = 0;
+        int triggered_count = 0;
+        for (int i = 0; i < loop; i++) {
+            while (std::getline(inputFile, line)) {
+                AnalyzeTextResult result;
+                auto analyzeStart = std::chrono::high_resolution_clock::now();
+
+                AnalyzeText(aac, line, result);
+
+                auto analyzeEnd = std::chrono::high_resolution_clock::now();
+                auto analyzeTextDuration = std::chrono::duration_cast<std::chrono::milliseconds>(analyzeEnd - analyzeStart);
+                avg += analyzeTextDuration.count();
+
+                std::string buffer = "";
+                buffer.append("*index:" + std::to_string(count));
+                buffer.append(", duration:" + std::to_string(analyzeTextDuration.count()) + " ms ");
+                std::cout << line << std::endl;
+                bool levelGT0 = false;
+                for (const auto& categoryAnalysis : result.categoriesAnalysis) {
+                    buffer.append("[type:" + getCategoryName(categoryAnalysis.category));
+                    buffer.append(", category:" + std::to_string(static_cast<int>(categoryAnalysis.severity)));
+                    buffer.append("]");
+                    if (static_cast<int>(categoryAnalysis.severity) > 0) {
+                        levelGT0 = true;
+                    }
+                }
+                buffer.append(", text:" + line);
+                std::cout << buffer << std::endl;
+                count++;
+                if (levelGT0) {
+                    triggered_count++;
+                }
+            }
+            inputFile.clear();
+            inputFile.seekg(0, std::ios::beg);
+        }
+        std::cout << "avg duration:" << avg / count << " ms" << std::endl;
+        std::cout << "totlal count:" << count << " triggerd count:" << triggered_count << " rate((count-triggered_count)*100.0/count):" << (count - triggered_count) * 100.0 / count << "%" << std::endl;
+        inputFile.close();
     }
-
-    char* data = (char*)MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, 0);
-    if (data == NULL) {
-        std::cerr << "Could not map view of file" << std::endl;
-        CloseHandle(hMapFile);
-        CloseHandle(hFile);
-        return buffer;
+    else {
+        std::cout << "Failed to open the file." << std::endl;
     }
+}
 
-    buffer.assign(data, data + fileSize);
+class NullStreamBuf : public std::streambuf {
+protected:
+    virtual int overflow(int c) { return c; }
+};
 
-    UnmapViewOfFile(data);
-    CloseHandle(hMapFile);
-    CloseHandle(hFile);
-#else
-    int fd = open(filename.c_str(), O_RDONLY);
-    if (fd == -1) {
-        std::cerr << "Could not open file" << std::endl;
-        return buffer;
-    }
+bool FileExists(const std::string& filePath) {
+    // 获取文件属性
+    DWORD fileAttr = GetFileAttributes(filePath.c_str());
 
-    struct stat sb;
-    if (fstat(fd, &sb) == -1) {
-        std::cerr << "Could not get file size" << std::endl;
-        close(fd);
-        return buffer;
-    }
+    // 检查是否返回无效属性
+    return (fileAttr != INVALID_FILE_ATTRIBUTES && !(fileAttr & FILE_ATTRIBUTE_DIRECTORY));
+}
 
-    char* data = static_cast<char*>(mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0));
-    if (data == MAP_FAILED) {
-        std::cerr << "Could not map file" << std::endl;
-        close(fd);
-        return buffer;
-    }
-
-    buffer.assign(data, data + sb.st_size);
-
-    munmap(data, sb.st_size);
-    close(fd);
-#endif
+std::string GetStringFromIni(const std::string& key, const std::string& filePath) {
+    char buffer[2560] = { 0 };
+    GetPrivateProfileString("AacsConfig", key.c_str(), "", buffer, sizeof(buffer), filePath.c_str());
     return buffer;
 }
 
-void Init(TextModelRuntime **aacs, std::map<std::string, std::string> config) {
-    std::string licenseText = config["licenseText"];
-
-    TextModelConfig aacsConfig;
-    aacsConfig.gpuEnabled = (config["gpuEnabled"] == "true");
-    aacsConfig.gpuDeviceId = std::stoi(config["gpuDeviceId"]);
-    aacsConfig.numThreads = std::stoi(config["numThreads"]);
-    aacsConfig.modelDirectory = config["modelDirectory"];
-    aacsConfig.modelName = config["modelName"];
-    aacsConfig.spmModelName = config["spmModelName"];
-    std::cout << "gpuEnabled: " << aacsConfig.gpuEnabled << std::endl;
-    std::cout << "gpuDeviceId: " << aacsConfig.gpuDeviceId << std::endl;
-    std::cout << "numThreads: " << aacsConfig.numThreads << std::endl;
-    std::cout << "modelDirectory: " << aacsConfig.modelDirectory << std::endl;
-    std::cout << "modelName: " << aacsConfig.modelName << std::endl;
-    std::cout << "spmModelName: " << aacsConfig.spmModelName << std::endl;
-
-    (*aacs) = new TextModelRuntime(licenseText.c_str(), aacsConfig);
-    try {
-        (*aacs)->Reload();
-    } catch (const std::exception &ex) {
-        std::cerr << "Exception caught: " << ex.what() << std::endl;
-    } catch (...) {
-        std::cerr << "Unknown exception caught" << std::endl;
+bool ReadConfigFromFile(const std::string& filePath, TextModelConfig& config) {
+    if (!FileExists(filePath)) {
+        std::cout << "can not open config file " << filePath << std::endl;
+        return false;
     }
+    
+    config.gpuEnabled = GetPrivateProfileInt("AacsConfig", "gpuEnabled", config.gpuEnabled, filePath.c_str());
+    config.gpuDeviceId = GetPrivateProfileInt("AacsConfig", "gpuDeviceId", config.gpuDeviceId, filePath.c_str());
+    config.modelDirectory = GetCurrentDir();
+    config.modelName = GetStringFromIni("modelName", filePath);
+    config.spmModelName = GetStringFromIni("spmModelName", filePath);
+
+    config.numThreads = GetPrivateProfileInt("AacsConfig", "numThreads", config.numThreads, filePath.c_str());
+    std::cout << "config.gpuEnabled:" << config.gpuEnabled << std::endl
+        << ",config.gpuDeviceId:" << config.gpuDeviceId << std::endl
+        << ",config.modelDirectory:" << config.modelDirectory << std::endl
+        << ",config.numThreads:" << config.numThreads << std::endl;
+    return true;
 }
 
-void processInputText(TextModelRuntime* aacs, std::string inputText) {
-    AnalyzeTextOptions request;
-    std::cout << "  Your input: " << inputText << std::endl;
-    request.text = inputText;
-    std::cout << "  AnalyzeResult: " << std::endl;
-    auto severityThreshold = 3;
-    // Run inference
-    auto analyzeStart = std::chrono::high_resolution_clock::now();
-    auto* result = new AnalyzeTextResult();
-    aacs->AnalyzeText(request, *result);
-    // Print the result to the console
-    for (const auto& categoryAnalysis : result->categoriesAnalysis) {
-        if (categoryAnalysis.severity > 0 && categoryAnalysis.severity < severityThreshold) {
-            std::cout << "\033[33m";  // Set the text color to yellow
+//EmbeddedAACSTextDemo.exe 0 10
+//EmbeddedAACSTextDemo.exe 1 10 input.txt 0
+//EmbeddedAACSTextDemo.exe 2
+int main(int argc, char* argv[])
+{
+#if 0
+    if (argc < 2) {
+        std::cout << "Test load and unload : EmbeddedAACSTextDemo.exe 0 10" << std::endl;
+        std::cout << "Test analyze text from file : EmbeddedAACSTextDemo.exe 1 10 input.txt [1|0]" << std::endl;
+        std::cout << "Test analyze text from cmd : EmbeddedAACSTextDemo.exe 2" << std::endl;
+        return -1;
+    }
+#endif
+
+    std::string configPath = GetCurrentDir() + "\\config.ini";
+    TextModelConfig config;
+    ReadConfigFromFile(configPath, config);
+    std::string license = GetStringFromIni("licenseText", configPath);
+
+    std::cout << "license:" << license << std::endl;
+
+    int type = atoi(argv[1]);
+    if (type == 0) {// test load and unload
+        if (argc < 3) {
+            std::cout << "Test load and unload : EmbeddedAACSTextDemo.exe 0 10" << std::endl;
+            return -1;
         }
-        else if (categoryAnalysis.severity >= severityThreshold) {
-            std::cout << "\033[31m";  // Set the text color to red
+
+        long long initAvg = 0;
+        long long uninitAvg = 0;
+        int count = atoi(argv[2]);
+        for (int i = 0; i < count; i++) {
+            TextModelRuntime* aac = NULL;
+            auto start = std::chrono::high_resolution_clock::now();
+            Init(&aac, config, license);
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            std::cout << "*index:" << i << "[init]duration: " << duration.count() << " milliseconds" << std::endl;
+            initAvg += duration.count();
+
+            start = std::chrono::high_resolution_clock::now();
+            aac->Unload();
+            end = std::chrono::high_resolution_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            std::cout << "*index:" << i << "[uninit] duration: " << duration.count() << " milliseconds" << std::endl;
+            uninitAvg += duration.count();
+
+            delete aac;
         }
-        else {
-            std::cout << "\033[32m";  // Set the text color to green
+        std::cout << "**summery average duration, init: " << initAvg / count << " milliseconds"
+            << ",uinit:" << uninitAvg / count << " milliseconds" << std::endl;
+    }
+    else if (type == 1) { // test analyze text from file
+        if (argc < 4) {
+            std::cout << "Test analyze text from file : EmbeddedAACSTextDemo.exe 1 10 input.txt" << std::endl;
+            return -1;
         }
-        std::cout << "    Category: " << getCategoryName(categoryAnalysis.category) << ", Severity: "
-            << static_cast<int>(categoryAnalysis.severity) << std::endl;
-        std::cout << "\033[0m";  // Reset the text color
-    }
-    auto analyzeEnd = std::chrono::high_resolution_clock::now();
-    auto analyzeTextDuration = std::chrono::duration_cast<std::chrono::milliseconds>(analyzeEnd - analyzeStart);
-    std::cout << "AnalyzeText duration: " << analyzeTextDuration.count() << " milliseconds" << std::endl;
-    std::cout << "--------------------------------------------------------------------------------------"
-        << std::endl;
-}
 
-void processInputTextWithBlockList(TextModelRuntime* aacs, std::string inputText, std::vector<std::string> blocklist_names) {
-    AnalyzeTextOptions request;
-    std::cout << "  Your input: " << inputText << std::endl;
-    request.text = inputText;
-    request.blocklistNames = blocklist_names;
-    std::cout << "  AnalyzeResult: " << std::endl;
-    auto severityThreshold = 3;
-    // Run inference
-    auto analyzeStart = std::chrono::high_resolution_clock::now();
-    auto* result = new AnalyzeTextResult();
-    aacs->AnalyzeText(request, *result);
-    // Print the result to the console
-    for (const auto& categoryAnalysis : result->categoriesAnalysis) {
-        if (categoryAnalysis.severity > 0 && categoryAnalysis.severity < severityThreshold) {
-            std::cout << "\033[33m";  // Set the text color to yellow
+        NullStreamBuf nullBuffer;
+        std::streambuf* originalCoutStreamBuf = NULL;
+        if (argc >= 5 && atoi(argv[4]) == 1) {
+            originalCoutStreamBuf = std::cout.rdbuf(&nullBuffer);
+            std::cout << "This will not be printed." << std::endl;
+            //std::cout.rdbuf(originalCoutStreamBuf); //show log
         }
-        else if (categoryAnalysis.severity >= severityThreshold) {
-            std::cout << "\033[31m";  // Set the text color to red
-        }
-        else {
-            std::cout << "\033[32m";  // Set the text color to green
-        }
-        std::cout << "    Category: " << getCategoryName(categoryAnalysis.category) << ", Severity: "
-            << static_cast<int>(categoryAnalysis.severity) << std::endl;
-        std::cout << "\033[0m";  // Reset the text color
+
+        int count = atoi(argv[2]);
+        TextModelRuntime* aac = NULL;
+        Init(&aac, config, license);
+
+        std::string fileName = argv[3];
+        AnalyzeTextFromFile(aac, fileName, count);
+        Uninit(aac);
     }
-
-    std::cout << "  BlockList Matches : " << result->blocklistsMatched.size() << std::endl;
-    for (const auto& blockListItem : result->blocklistsMatched) {
-        std::cout << "\033[31m";  // Set the text color to red
-        std::cout << "    BlockList Name: " << blockListItem.blocklistName << ", Text: "
-            << blockListItem.blocklistItemText << std::endl;
-        std::cout << "\033[0m";  // Reset the text color
+    else {// test analyze text from cmd
+        TestFromCmd(config, license);
     }
-
-    auto analyzeEnd = std::chrono::high_resolution_clock::now();
-    auto analyzeTextDuration = std::chrono::duration_cast<std::chrono::milliseconds>(analyzeEnd - analyzeStart);
-    std::cout << "AnalyzeText duration: " << analyzeTextDuration.count() << " milliseconds" << std::endl;
-    std::cout << "--------------------------------------------------------------------------------------"
-        << std::endl;
-}
-
-void processInputFile(TextModelRuntime* aacs, const std::string& inputDirectory, const std::string& fileName) {
-    auto filePath = inputDirectory + "\\" + fileName;
-    std::ifstream file(filePath);
-
-    if (!file.is_open()) {
-        std::cerr << "processInputFile, Could not open file: " << filePath << std::endl;
-        return;
-    }
-
-    std::string line;
-    while (std::getline(file, line)) {
-        processInputText(aacs, line);
-    }
-
-    file.close();
-}
-
-
-void processInputFileWithBlockList(TextModelRuntime* aacs, const std::string& inputDirectory, const std::string& fileName) {
-    auto filePath = inputDirectory + "\\" + fileName;
-    std::ifstream file(filePath);
-
-    if (!file.is_open()) {
-        std::cerr << "processInputFileWithBlockList, Could not open file: " << filePath << std::endl;
-        return;
-    }
-
-    std::vector<std::string> blocklist_names;
-    for (const auto& entry : std::filesystem::directory_iterator(inputDirectory)) {
-        if (entry.is_regular_file()) {
-            if (entry.path().extension() == ".csv") {
-                std::vector<char> buffer = readFile(entry.path().string());
-                auto blockListName = entry.path().stem().string();
-                aacs->AddBlocklist(blockListName, buffer.data(), buffer.size());
-                blocklist_names.push_back(blockListName);
-                std::cout << "processInputFileWithBlockList, adding block list : " << blockListName << std::endl;
-            }
-        }
-    }
-
-    std::string line;
-    while (std::getline(file, line)) {
-        processInputTextWithBlockList(aacs, line, blocklist_names);
-    }
-
-    file.close();
-}
-
-void processSampleInputFiles(TextModelRuntime *aacs, const std::string& inputDirectory, const std::string& inputFileName, const std::string& inputWithBlockListFileName) {
-    processInputFile(aacs, inputDirectory, inputFileName);
-    processInputFileWithBlockList(aacs, inputDirectory, inputWithBlockListFileName);
-}
-
-int main(int argc, char *argv[]) {
-    std::map<std::string, std::string> config = readConfig("config.ini");
-    TextModelRuntime *aacs = NULL;
-    Init(&aacs, config);
-
-    processSampleInputFiles(aacs, config["inputTextDirectory"], config["inputTextFile"], config["inputWithBlockListTextFile"]);
-
-    std::cout << "Press any key to continue..";
-    _getch();
+    std::cout << "end" << std::endl;
     return 0;
 }
 
