@@ -125,10 +125,9 @@ void TestFromCmd(const TextModelConfig& config, const std::string & license) {
         auto severityThreshold = 3;
         // Run inference
         auto analyzeStart = std::chrono::high_resolution_clock::now();
-        AnalyzeTextResult result;
-        aacs->AnalyzeText(request, result);
+        auto result = aacs->AnalyzeText(request);
         // Print the result to the console
-        for (const auto& categoryAnalysis : result.categoriesAnalysis) {
+        for (const auto& categoryAnalysis : result->categoriesAnalysis) {
             if (categoryAnalysis.severity > 0 && categoryAnalysis.severity < severityThreshold) {
                 std::cout << "\033[33m";  // Set the text color to yellow
             }
@@ -149,14 +148,6 @@ void TestFromCmd(const TextModelConfig& config, const std::string & license) {
     }
 }
 
-
-void AnalyzeText(TextModelRuntime* aacs, const std::string& inputText, AnalyzeTextResult& out)
-{
-    AnalyzeTextOptions request;
-    request.text = inputText;
-    aacs->AnalyzeText(request, out);
-}
-
 void AnalyzeTextFromFile(TextModelRuntime* aac, const std::string& file, int loop) {
     std::ifstream inputFile;
 
@@ -168,10 +159,11 @@ void AnalyzeTextFromFile(TextModelRuntime* aac, const std::string& file, int loo
         int triggered_count = 0;
         for (int i = 0; i < loop; i++) {
             while (std::getline(inputFile, line)) {
-                AnalyzeTextResult result;
                 auto analyzeStart = std::chrono::high_resolution_clock::now();
 
-                AnalyzeText(aac, line, result);
+                AnalyzeTextOptions request;
+                request.text = line;
+                auto result = aac->AnalyzeText(request);
 
                 auto analyzeEnd = std::chrono::high_resolution_clock::now();
                 auto analyzeTextDuration = std::chrono::duration_cast<std::chrono::milliseconds>(analyzeEnd - analyzeStart);
@@ -182,7 +174,7 @@ void AnalyzeTextFromFile(TextModelRuntime* aac, const std::string& file, int loo
                 buffer.append(", duration:" + std::to_string(analyzeTextDuration.count()) + " ms ");
                 std::cout << line << std::endl;
                 bool levelGT0 = false;
-                for (const auto& categoryAnalysis : result.categoriesAnalysis) {
+                for (const auto& categoryAnalysis : result->categoriesAnalysis) {
                     buffer.append("[type:" + getCategoryName(categoryAnalysis.category));
                     buffer.append(", category:" + std::to_string(static_cast<int>(categoryAnalysis.severity)));
                     buffer.append("]");
